@@ -619,7 +619,9 @@ async function startAnalysis(){
 function renderAnalysis(sym,price,pct,ticker,results,signal,oi,funding){
   const pc=pct>=0?'var(--green)':'var(--red)';
   const di={LONG:'🟢',SHORT:'🔴',NEUTRAL:'⚪'};
-  const d1=results[3];
+  const vol24 = parseFloat(ticker.turnover24h || 0);
+  const volStr = vol24>=1e9 ? `${(vol24/1e9).toFixed(1)}B` : vol24>=1e6 ? `${(vol24/1e6).toFixed(0)}M` : '—';
+  const d1 = results[3];
 
   const tfCards=results.map(r=>`<div class="tf-card">
     <div style="font-size:11px;color:var(--blue);margin-bottom:5px;letter-spacing:1px">${r.tf}</div>
@@ -668,8 +670,8 @@ function renderAnalysis(sym,price,pct,ticker,results,signal,oi,funding){
     ${d1.nearSupport?`<div style="font-size:12px;color:var(--green)">🟢 ${fmt(d1.nearSupport.price)}</div>`:''}
   </div>`:'';
 
-  const vol24=parseFloat(ticker.turnover24h||0);
-  const volStr=vol24>=1e9?`$${(vol24/1e9).toFixed(1)}B`:vol24>=1e6?`$${(vol24/1e6).toFixed(0)}M`:'—';
+  const vol24x = parseFloat(ticker.turnover24h||0);
+  const volStrx = vol24x>=1e9?`${(vol24x/1e9).toFixed(1)}B`:vol24x>=1e6?`${(vol24x/1e6).toFixed(0)}M`:'—';
 
   document.getElementById('analysisArea').innerHTML=`
     <div class="card">
