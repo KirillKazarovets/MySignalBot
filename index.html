@@ -306,6 +306,71 @@ function detectCluster(candles) {
   return {sig:bull?'bull':'bear', desc:`${bull?'Покупки':'Продажи'} ${(last.v/avg).toFixed(1)}x avg`};
 }
 
+// ── ДОПОЛНИТЕЛЬНЫЕ ИНДИКАТОРЫ ─────────────────────────────────────────────────
+function calcVWAP(candles) {
+  let cumTPV = 0, cumVol = 0;
+  for (const c of candles) {
+    const tp = (c.h + c.l + c.c) / 3;
+    cumTPV += tp * c.v;
+    cumVol += c.v;
+  }
+  return cumVol > 0 ? cumTPV / cumVol : 0;
+}
+
+function calcMACD(closes) {
+  const ema12 = ema(closes, 12);
+  const ema26 = ema(closes, 26);
+  const macdLine = ema12 - ema26;
+  // Signal line = EMA9 of MACD (упрощённо)
+  const macdArr = closes.slice(26).map((_, i) => {
+    const sl = closes.slice(0, 26 + i + 1);
+    return ema(sl, 12) - ema(sl, 26);
+  });
+  const signal = ema(macdArr, 9);
+  const hist = macdLine - signal;
+  return { macd: macdLine, signal, hist };
+}
+
+function calcBollinger(closes, p = 20, mult = 2) {
+  const slice = closes.slice(-p);
+  const mid = slice.reduce((a, b) => a + b, 0) / p;
+  const std = Math.sqrt(slice.reduce((a, b) => a + (b - mid) ** 2, 0) / p);
+  return { upper: mid + mult * std, mid, lower: mid - mult * std, std };
+}
+
+function calcSupportResistance(candles) {
+  // Находим локальные максимумы и минимумы
+  const levels = [];
+  for (let i = 2; i < candles.length - 2; i++) {
+    const isHigh = candles[i].h > candles[i-1].h && candles[i].h > candles[i-2].h &&
+                   candles[i].h > candles[i+1].h && candles[i].h > candles[i+2].h;
+    const isLow  = candles[i].l < candles[i-1].l && candles[i].l < candles[i-2].l &&
+                   candles[i].l < candles[i+1].l && candles[i].l < candles[i+2].l;
+    if (isHigh) levels.push({ type: 'resistance', price: candles[i].h });
+    if (isLow)  levels.push({ type: 'support',    price: candles[i].l });
+  }
+  // Кластеризуем близкие уровни (в пределах 0.5%)
+  const clustered = [];
+  for (const lv of levels) {
+    const existing = clustered.find(c => Math.abs(c.price - lv.price) / lv.price < 0.005 && c.type === lv.type);
+    if (existing) { existing.strength++; existing.price = (existing.price + lv.price) / 2; }
+    else clustered.push({ ...lv, strength: 1 });
+  }
+  return clustered.sort((a, b) => b.strength - a.strength).slice(0, 6);
+}
+
+function calcStochRSI(closes, rsiPeriod = 14, stochPeriod = 14) {
+  // Считаем массив RSI
+  const rsiArr = [];
+  for (let i = rsiPeriod; i <= closes.length; i++) {
+    rsiArr.push(rsi(closes.slice(0, i), rsiPeriod));
+  }
+  if (rsiArr.length < stochPeriod) return 50;
+  const slice = rsiArr.slice(-stochPeriod);
+  const minR = Math.min(...slice), maxR = Math.max(...slice);
+  return maxR === minR ? 50 : ((rsiArr[rsiArr.length-1] - minR) / (maxR - minR)) * 100;
+}
+
 function calcTF(candles, tfLabel) {
   const cl = candles.map(c=>c.c), vl = candles.map(c=>c.v);
   const price = cl[cl.length-1];
@@ -340,11 +405,43 @@ function calcTF(candles, tfLabel) {
     else{score--;reasons.push(`FVG медвежий (${fmt(lastFvg.bot)}–${fmt(lastFvg.top)})`)}
   }
 
-  score=Math.max(-5,Math.min(5,score));
-  const dir=score>=2?'LONG':score<=-2?'SHORT':'NEUTRAL';
-  const emaAlign=emaBull?'бычье':emaBear?'медвежье':'смешанное';
+  // Доп. индикаторы
+  const vwap     = calcVWAP(candles);
+  const macdData = calcMACD(cl);
+  const bb       = calcBollinger(cl);
+  const srLevels = calcSupportResistance(candles);
+  const stochRsi = calcStochRSI(cl);
 
-  return {tf:tfLabel,dir,score,rsi:r,e20,e50,e100,ma50,mavol,lastVol,cluster,fvg:lastFvg?lastFvg.type:'нет',fvgLevel:lastFvg?`${fmt(lastFvg.bot)}–${fmt(lastFvg.top)}`:null,emaAlign,price,reasons};
+  // VWAP сигнал
+  if (price > vwap * 1.001) { score++; reasons.push(`Цена выше VWAP (${fmt(vwap)}) — покупатели контролируют`); }
+  else if (price < vwap * 0.999) { score--; reasons.push(`Цена ниже VWAP (${fmt(vwap)}) — продавцы контролируют`); }
+
+  // MACD
+  if (macdData.hist > 0 && macdData.macd > macdData.signal) { score++; reasons.push('MACD бычий крест — импульс вверх'); }
+  else if (macdData.hist < 0 && macdData.macd < macdData.signal) { score--; reasons.push('MACD медвежий крест — импульс вниз'); }
+
+  // Bollinger Bands
+  const bbPos = (price - bb.lower) / (bb.upper - bb.lower);
+  if (price < bb.lower) { score++; reasons.push(`Цена ниже нижней BB (${fmt(bb.lower)}) — перепродан`); }
+  else if (price > bb.upper) { score--; reasons.push(`Цена выше верхней BB (${fmt(bb.upper)}) — перекуплен`); }
+  else if (bbPos < 0.2) reasons.push(`BB: цена у нижней границы (${fmt(bb.lower)})`);
+  else if (bbPos > 0.8) reasons.push(`BB: цена у верхней границы (${fmt(bb.upper)})`);
+
+  // Stoch RSI
+  if (stochRsi < 20) { score++; reasons.push(`Stoch RSI ${stochRsi.toFixed(0)} — сильно перепродан`); }
+  else if (stochRsi > 80) { score--; reasons.push(`Stoch RSI ${stochRsi.toFixed(0)} — сильно перекуплен`); }
+
+  // Ближайшие уровни
+  const nearSupport    = srLevels.filter(l => l.type === 'support'    && l.price < price).sort((a,b) => b.price - a.price)[0];
+  const nearResistance = srLevels.filter(l => l.type === 'resistance' && l.price > price).sort((a,b) => a.price - b.price)[0];
+
+  score = Math.max(-5, Math.min(5, score));
+  const dir = score >= 2 ? 'LONG' : score <= -2 ? 'SHORT' : 'NEUTRAL';
+  const emaAlign = emaBull ? 'бычье' : emaBear ? 'медвежье' : 'смешанное';
+
+  return { tf:tfLabel, dir, score, rsi:r, stochRsi, e20, e50, e100, ma50, mavol, lastVol,
+           cluster, fvg:lastFvg?lastFvg.type:'нет', fvgLevel:lastFvg?`${fmt(lastFvg.bot)}–${fmt(lastFvg.top)}`:null,
+           emaAlign, price, reasons, vwap, macd:macdData, bb, srLevels, nearSupport, nearResistance, bbPos };
 }
 
 // ── СИГНАЛ ────────────────────────────────────────────────────────────────────
@@ -446,7 +543,24 @@ async function startAnalysis() {
     setLoad('Генерируем сигнал...','Анализируем паттерны');
     const signal = generateSignal(sym, price, results);
 
-    renderAnalysis(sym, price, pct, ticker, results, signal);
+    setLoad('Загружаем доп. данные...','Open Interest · Funding Rate');
+    let oi = null, funding = null;
+    try {
+      const [oiData, frData] = await Promise.all([
+        bybitFetch(`/v5/market/open-interest?category=linear&symbol=${sym}&intervalTime=1h&limit=2`),
+        bybitFetch(`/v5/market/funding/history?category=linear&symbol=${sym}&limit=1`)
+      ]);
+      if (oiData.retCode === 0 && oiData.result?.list?.length) {
+        const list = oiData.result.list;
+        oi = { cur: parseFloat(list[0]?.openInterest||0), prev: parseFloat(list[1]?.openInterest||0) };
+        oi.change = oi.prev > 0 ? ((oi.cur - oi.prev) / oi.prev * 100) : 0;
+      }
+      if (frData.retCode === 0 && frData.result?.list?.length) {
+        funding = parseFloat(frData.result.list[0]?.fundingRate || 0) * 100;
+      }
+    } catch(_) {}
+
+    renderAnalysis(sym, price, pct, ticker, results, signal, oi, funding);
     if (signal) {
       renderSignal(signal);
       saveHistory(signal);
@@ -459,7 +573,7 @@ async function startAnalysis() {
   btn.disabled=false; btn.textContent='▶ Анализировать';
 }
 
-function renderAnalysis(sym, price, pct, ticker, results, signal) {
+function renderAnalysis(sym, price, pct, ticker, results, signal, oi, funding) {
   const pctColor=pct>=0?'var(--green)':'var(--red)';
   const di={LONG:'🟢',SHORT:'🔴',NEUTRAL:'⚪'};
 
@@ -487,7 +601,74 @@ function renderAnalysis(sym, price, pct, ticker, results, signal) {
       <td><span class="badge ${dc}">${r.dir}</span></td>
     </tr>`;}).join('');
 
-  const vol24 = parseFloat(ticker.turnover24h||0);
+  // Доп. факторы — берём с дневного таймфрейма (наиболее репрезентативен)
+  const d1 = results[3];
+  const oiHtml = oi ? (() => {
+    const oiColor = oi.change > 2 ? 'var(--green)' : oi.change < -2 ? 'var(--red)' : 'var(--muted)';
+    const oiIcon  = oi.change > 2 ? '📈' : oi.change < -2 ? '📉' : '➡️';
+    return `<div style="background:var(--bg3);border-radius:8px;padding:12px">
+      <div style="font-size:11px;color:var(--muted);margin-bottom:4px">OPEN INTEREST</div>
+      <div style="font-size:15px;font-weight:700">${oiIcon} ${(oi.cur/1e6).toFixed(1)}M</div>
+      <div style="font-size:12px;color:${oiColor}">${oi.change>0?'+':''}${oi.change.toFixed(2)}% за 1ч</div>
+      <div style="font-size:11px;color:var(--muted);margin-top:4px">${oi.change>2?'Рост позиций — тренд усиливается':oi.change<-2?'Закрытие позиций — тренд слабеет':'Стабильно'}</div>
+    </div>`;
+  })() : '';
+
+  const frHtml = funding !== null ? (() => {
+    const frColor = funding > 0.05 ? 'var(--red)' : funding < -0.05 ? 'var(--green)' : 'var(--muted)';
+    const frIcon  = funding > 0.05 ? '🔴' : funding < -0.05 ? '🟢' : '⚪';
+    const frDesc  = funding > 0.05 ? 'Лонги платят шортам — рынок перегрет вверх' :
+                    funding < -0.05 ? 'Шорты платят лонгам — рынок перепродан' : 'Нейтральный фандинг';
+    return `<div style="background:var(--bg3);border-radius:8px;padding:12px">
+      <div style="font-size:11px;color:var(--muted);margin-bottom:4px">FUNDING RATE</div>
+      <div style="font-size:15px;font-weight:700;color:${frColor}">${frIcon} ${funding.toFixed(4)}%</div>
+      <div style="font-size:11px;color:var(--muted);margin-top:4px">${frDesc}</div>
+    </div>`;
+  })() : '';
+
+  const vwapHtml = `<div style="background:var(--bg3);border-radius:8px;padding:12px">
+    <div style="font-size:11px;color:var(--muted);margin-bottom:4px">VWAP (1д)</div>
+    <div style="font-size:15px;font-weight:700">${fmt(d1.vwap)}</div>
+    <div style="font-size:12px;color:${price>d1.vwap?'var(--green)':'var(--red)'}">${price>d1.vwap?'▲ Цена выше VWAP':'▼ Цена ниже VWAP'}</div>
+    <div style="font-size:11px;color:var(--muted);margin-top:4px">${price>d1.vwap?'Покупатели контролируют':'Продавцы контролируют'}</div>
+  </div>`;
+
+  const bbHtml = `<div style="background:var(--bg3);border-radius:8px;padding:12px">
+    <div style="font-size:11px;color:var(--muted);margin-bottom:4px">BOLLINGER BANDS (1д)</div>
+    <div style="font-size:12px">↑ ${fmt(d1.bb.upper)}</div>
+    <div style="font-size:12px;color:var(--blue)">— ${fmt(d1.bb.mid)} (середина)</div>
+    <div style="font-size:12px">↓ ${fmt(d1.bb.lower)}</div>
+    <div style="font-size:11px;color:var(--muted);margin-top:4px">${d1.bbPos<0.2?'🟢 У нижней границы — перепродан':d1.bbPos>0.8?'🔴 У верхней границы — перекуплен':'Цена в середине канала'}</div>
+  </div>`;
+
+  const macdHtml = `<div style="background:var(--bg3);border-radius:8px;padding:12px">
+    <div style="font-size:11px;color:var(--muted);margin-bottom:4px">MACD (1д)</div>
+    <div style="font-size:12px">MACD: <strong style="color:${d1.macd.macd>0?'var(--green)':'var(--red)'}">${d1.macd.macd.toFixed(4)}</strong></div>
+    <div style="font-size:12px">Signal: <strong>${d1.macd.signal.toFixed(4)}</strong></div>
+    <div style="font-size:12px">Hist: <strong style="color:${d1.macd.hist>0?'var(--green)':'var(--red)'}">${d1.macd.hist.toFixed(4)}</strong></div>
+    <div style="font-size:11px;color:var(--muted);margin-top:4px">${d1.macd.hist>0?'🟢 Бычий импульс':'🔴 Медвежий импульс'}</div>
+  </div>`;
+
+  const srHtml = d1.nearSupport || d1.nearResistance ? `<div style="background:var(--bg3);border-radius:8px;padding:12px">
+    <div style="font-size:11px;color:var(--muted);margin-bottom:6px">УРОВНИ ПОДДЕРЖКИ/СОПРОТИВЛЕНИЯ</div>
+    ${d1.nearResistance?`<div style="font-size:12px;color:var(--red)">🔴 Сопротивление: <strong>${fmt(d1.nearResistance.price)}</strong> (сила: ${d1.nearResistance.strength})</div>`:''}
+    <div style="font-size:12px;color:var(--blue);margin:3px 0">— Текущая цена: <strong>${fmt(price)}</strong></div>
+    ${d1.nearSupport?`<div style="font-size:12px;color:var(--green)">🟢 Поддержка: <strong>${fmt(d1.nearSupport.price)}</strong> (сила: ${d1.nearSupport.strength})</div>`:''}
+  </div>` : '';
+
+  const stochHtml = `<div style="background:var(--bg3);border-radius:8px;padding:12px">
+    <div style="font-size:11px;color:var(--muted);margin-bottom:4px">STOCH RSI (1д)</div>
+    <div style="font-size:18px;font-weight:700;color:${d1.stochRsi<20?'var(--green)':d1.stochRsi>80?'var(--red)':'var(--text)'}">${d1.stochRsi.toFixed(1)}</div>
+    <div style="font-size:11px;color:var(--muted);margin-top:4px">${d1.stochRsi<20?'🟢 Сильно перепродан — возможен отскок':d1.stochRsi>80?'🔴 Сильно перекуплен — возможна коррекция':'Нейтральная зона'}</div>
+  </div>`;
+
+  const extraHtml = `
+    <div class="card">
+      <div class="card-title">Дополнительные факторы</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px">
+        ${vwapHtml}${bbHtml}${macdHtml}${stochHtml}${oiHtml}${frHtml}${srHtml}
+      </div>
+    </div>`;
   const volStr = vol24>=1e9?`$${(vol24/1e9).toFixed(1)}B`:vol24>=1e6?`$${(vol24/1e6).toFixed(0)}M`:'—';
 
   document.getElementById('analysisArea').innerHTML=`
@@ -515,6 +696,7 @@ function renderAnalysis(sym, price, pct, ticker, results, signal) {
         </table>
       </div>
     </div>
+    ${extraHtml}
     ${signal ? `
     <div class="card" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
       <div>
