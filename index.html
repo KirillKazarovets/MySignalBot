@@ -284,15 +284,24 @@ window.addEventListener('load',()=>{
   },2600);
 });
 
-// ── STATE ──────────────────────────────────────────────────────────────────────
-let currentSignal=null,signalHistory=[],journal=[],tgTok='',tgChat='';
-let weights={rsi:1,ema:2,ma:1,fvg:1,cluster:1,vwap:1,macd:1,bb:1};
-try{signalHistory=JSON.parse(localStorage.getItem('sh')||'[]');}catch(_){}
-try{journal=JSON.parse(localStorage.getItem('jn')||'[]');}catch(_){}
-try{const w=localStorage.getItem('wt');if(w)weights={...weights,...JSON.parse(w)};}catch(_){}
-const CHECK_INTERVAL=30*60*1000;
-setInterval(checkPending,CHECK_INTERVAL);
-setTimeout(checkPending,5000);
+// ── ХРАНИЛИЩЕ (облако + локальное) ────────────────────────────────────────────
+async function cloudSave(key, data) {
+  try { await window.storage.set(key, JSON.stringify(data)); } catch(_) {}
+  try { localStorage.setItem(key, JSON.stringify(data)); } catch(_) {}
+}
+async function cloudLoad(key) {
+  try { const r = await window.storage.get(key); if (r?.value) return JSON.parse(r.value); } catch(_) {}
+  try { const v = localStorage.getItem(key); if (v) return JSON.parse(v); } catch(_) {}
+  return null;
+}
+
+async function initData() {
+  signalHistory = (await cloudLoad('sh')) || [];
+  journal       = (await cloudLoad('jn')) || [];
+  try { const w = await cloudLoad('wt'); if (w) weights = {...weights, ...w}; } catch(_) {}
+  renderHistory();
+  renderJournal();
+}
 
 function showPage(p,el){
   document.querySelectorAll('.page').forEach(x=>x.classList.remove('active'));
@@ -462,10 +471,10 @@ function renderSignal(s){
 function saveToHistory(s){
   s.id=Date.now();s.time=new Date().toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'});s.date=new Date().toLocaleDateString('ru-RU');s.status='pending';
   signalHistory.unshift(s);if(signalHistory.length>200)signalHistory.pop();
-  localStorage.setItem('sh',JSON.stringify(signalHistory));renderHistory();
+  cloudSave('sh',signalHistory);renderHistory();
 }
-function setStatus(id,st){const s=signalHistory.find(x=>x.id===id);if(s){s.status=st;localStorage.setItem('sh',JSON.stringify(signalHistory));renderHistory();recalcWeights();}}
-function delSignal(id){signalHistory=signalHistory.filter(x=>x.id!==id);localStorage.setItem('sh',JSON.stringify(signalHistory));renderHistory();}
+function setStatus(id,st){const s=signalHistory.find(x=>x.id===id);if(s){s.status=st;cloudSave('sh',signalHistory);renderHistory();recalcWeights();}}
+function delSignal(id){signalHistory=signalHistory.filter(x=>x.id!==id);cloudSave('sh',signalHistory);renderHistory();}
 
 async function checkPending(){
   const pending=signalHistory.filter(s=>s.status==='pending');if(!pending.length)return;
@@ -540,42 +549,71 @@ function addJournal(){
     why:document.getElementById('jWhy').value,review:document.getElementById('jReview').value,
     inds,date:new Date().toLocaleDateString('ru-RU'),time:new Date().toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'})
   });
-  localStorage.setItem('jn',JSON.stringify(journal));
+  cloudSave('jn',journal);
   ['jSym','jEntry','jExit','jStop','jTake','jSize','jWhy','jReview'].forEach(id=>document.getElementById(id).value='');
   document.querySelectorAll('.jInd').forEach(cb=>cb.checked=false);
   renderJournal();
 }
 
-function delJournal(id){journal=journal.filter(x=>x.id!==id);localStorage.setItem('jn',JSON.stringify(journal));renderJournal();}
+function delJournal(id){journal=journal.filter(x=>x.id!==id);cloudSave('jn',journal);renderJournal();}
+
+let journalOpen = false;
 
 function renderJournal(){
   const stats=document.getElementById('jStats'),list=document.getElementById('jList');
   if(!stats||!list)return;
-  if(!journal.length){stats.innerHTML='';list.innerHTML='<div style="color:var(--muted);font-size:13px;padding:10px 0">Сделок пока нет — добавь первую выше</div>';return;}
+
+  if(!journal.length){
+    stats.innerHTML='';
+    list.innerHTML='<div style="color:var(--muted);font-size:13px;padding:10px 0">Сделок пока нет — добавь первую выше</div>';
+    return;
+  }
+
   const wins=journal.filter(j=>j.pnl>0),losses=journal.filter(j=>j.pnl<=0);
   const totalPnl=journal.reduce((a,j)=>a+j.pnl,0),wr=Math.round(wins.length/journal.length*100);
   const avgW=wins.length?wins.reduce((a,j)=>a+j.pnl,0)/wins.length:0;
   const avgL=losses.length?Math.abs(losses.reduce((a,j)=>a+j.pnl,0)/losses.length):0;
+
   stats.innerHTML=`<div class="card"><div class="card-title">Статистика</div><div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px">
-    ${[['Сделок','var(--blue)',journal.length],['Винрейт',wr>=50?'var(--green)':'var(--red)',wr+'%'],['Итого P&L',totalPnl>=0?'var(--green)':'var(--red)',(totalPnl>=0?'+':'')+`$${totalPnl.toFixed(2)}`],['Ср. выигрыш','var(--green)',`+$${avgW.toFixed(2)}`],['Ср. проигрыш','var(--red)',`-$${avgL.toFixed(2)}`],['Профит-фактор','var(--yellow)',avgL>0?(avgW/avgL).toFixed(2):'∞']].map(([l,c,v])=>`<div class="extra-card"><div class="extra-label">${l}</div><div class="extra-value" style="color:${c}">${v}</div></div>`).join('')}
+    ${[['Сделок','var(--blue)',journal.length],['Винрейт',wr>=50?'var(--green)':'var(--red)',wr+'%'],['Итого P&L',totalPnl>=0?'var(--green)':'var(--red)',(totalPnl>=0?'+':'')+`${totalPnl.toFixed(2)}`],['Ср. выигрыш','var(--green)',`+${avgW.toFixed(2)}`],['Ср. проигрыш','var(--red)',`-${avgL.toFixed(2)}`],['Профит-фактор','var(--yellow)',avgL>0?(avgW/avgL).toFixed(2):'∞']].map(([l,c,v])=>`<div class="extra-card"><div class="extra-label">${l}</div><div class="extra-value" style="color:${c}">${v}</div></div>`).join('')}
   </div></div>`;
-  list.innerHTML=journal.map(j=>{
+
+  // Стопка
+  const topJ = journal[0];
+  const isW0 = topJ.pnl > 0;
+  const stackHtml = `
+    <div id="jStack" onclick="toggleJournal()" style="position:relative;cursor:pointer;margin-bottom:${journalOpen?'14px':'0'}">
+      ${journal.length>=3?`<div style="position:absolute;top:8px;left:8px;right:8px;height:60px;background:rgba(0,180,255,.06);border:1px solid rgba(0,180,255,.12);border-radius:10px;z-index:1"></div>`:''}
+      ${journal.length>=2?`<div style="position:absolute;top:4px;left:4px;right:4px;height:60px;background:rgba(0,180,255,.09);border:1px solid rgba(0,180,255,.15);border-radius:10px;z-index:2"></div>`:''}
+      <div style="position:relative;z-index:3;background:rgba(15,23,41,.95);border:1px solid rgba(0,180,255,.3);border-radius:10px;padding:14px 16px;display:flex;align-items:center;justify-content:space-between">
+        <div style="display:flex;align-items:center;gap:10px">
+          <strong style="font-size:15px">${topJ.sym}</strong>
+          <span class="badge ${topJ.dir==='LONG'?'bull':'bear'}">${topJ.dir}</span>
+          <span style="color:var(--muted);font-size:12px">${topJ.tf}</span>
+          <span style="color:${isW0?'var(--green)':'var(--red)'};font-weight:800">${isW0?'+':''} ${topJ.pnl.toFixed(2)}</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px">
+          <span style="background:rgba(0,180,255,.15);color:var(--blue);border:1px solid rgba(0,180,255,.3);padding:3px 10px;border-radius:6px;font-size:12px;font-weight:700">${journal.length} сделок</span>
+          <span style="color:var(--blue);font-size:18px">${journalOpen?'▲':'▼'}</span>
+        </div>
+      </div>
+    </div>`;
+
+  const entriesHtml = journalOpen ? journal.map(j=>{
     const isW=j.pnl>0,stars='⭐'.repeat(parseInt(j.rate)||0);
     return`<div class="hist-item">
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">
         <strong>${j.sym}</strong><span class="badge ${j.dir==='LONG'?'bull':'bear'}">${j.dir}</span>
         <span style="color:var(--muted);font-size:12px">${j.tf}</span>
         ${j.str?`<span style="background:rgba(180,74,255,.15);color:var(--purple);border:1px solid rgba(180,74,255,.3);padding:1px 7px;border-radius:4px;font-size:11px">${j.str}</span>`:''}
-        <span style="color:${isW?'var(--green)':'var(--red)'};font-weight:800;font-size:16px">${isW?'+':''} $${j.pnl.toFixed(2)}</span>
+        <span style="color:${isW?'var(--green)':'var(--red)'};font-weight:800;font-size:15px">${isW?'+':''} ${j.pnl.toFixed(2)}</span>
         <span style="color:var(--muted);font-size:11px;margin-left:auto">${j.date} ${j.time}</span>
       </div>
       <div style="font-size:12px;display:flex;gap:12px;flex-wrap:wrap;margin-bottom:6px">
-        <span>Вход: <strong>${fmt(j.entry)}</strong></span>
-        <span>Выход: <strong>${fmt(j.exit)}</strong></span>
+        <span>Вход: <strong>${fmt(j.entry)}</strong></span><span>Выход: <strong>${fmt(j.exit)}</strong></span>
         ${j.stop?`<span>Стоп: <strong style="color:var(--red)">${fmt(j.stop)}</strong></span>`:''}
         ${j.take?`<span>Тейк: <strong style="color:var(--yellow)">${fmt(j.take)}</strong></span>`:''}
-        <span>$${j.size} · ${j.lev}</span>
-        ${j.rr?`<span>R:R 1:${j.rr}</span>`:''}
+        <span>${j.size} · ${j.lev}</span>${j.rr?`<span>R:R 1:${j.rr}</span>`:''}
       </div>
       ${j.inds?.length?`<div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:6px">${j.inds.map(i=>`<span style="background:rgba(0,180,255,.1);color:var(--blue);border:1px solid rgba(0,180,255,.2);padding:1px 7px;border-radius:4px;font-size:11px">${i}</span>`).join('')}</div>`:''}
       <div style="font-size:12px;color:var(--muted);display:flex;gap:12px;flex-wrap:wrap;margin-bottom:4px">
@@ -585,7 +623,14 @@ function renderJournal(){
       ${j.review?`<div style="font-size:12px;color:var(--cyan);margin-bottom:4px">💡 <em>${j.review}</em></div>`:''}
       <button onclick="delJournal(${j.id})" class="btn btn-o" style="font-size:11px;padding:2px 8px;margin-top:4px">🗑 Удалить</button>
     </div>`;
-  }).join('');
+  }).join('') : '';
+
+  list.innerHTML = stackHtml + (journalOpen ? `<div style="margin-top:4px">${entriesHtml}</div>` : '');
+}
+
+function toggleJournal(){
+  journalOpen = !journalOpen;
+  renderJournal();
 }
 
 // ── TELEGRAM ──────────────────────────────────────────────────────────────────
@@ -605,9 +650,12 @@ async function testTG(){
   try{const r=await fetch(`https://api.telegram.org/bot${tok}/sendMessage`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_id:cid,text:'✅ SignalBot подключён!'})});const d=await r.json();m.innerHTML=d.ok?'<div class="alert alert-s">✅ Тест прошёл!</div>':`<div class="alert alert-e">❌ ${d.description}</div>`;}catch(e){m.innerHTML=`<div class="alert alert-e">❌ ${e.message}</div>`;}
 }
 
-// Инициализация
-renderHistory();
-renderJournal();
+let currentSignal=null,signalHistory=[],journal=[],tgTok='',tgChat='';
+let weights={rsi:1,ema:2,ma:1,fvg:1,cluster:1,vwap:1,macd:1,bb:1};
+const CHECK_INTERVAL=30*60*1000;
+setInterval(checkPending,CHECK_INTERVAL);
+setTimeout(checkPending,5000);
+initData();
 </script>
 </body>
 </html>
