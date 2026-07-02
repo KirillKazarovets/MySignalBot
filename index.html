@@ -181,6 +181,7 @@ tr:hover td{background:rgba(0,180,255,.04)}
   <div class="nav-tabs">
     <button class="tab active" id="tab-analyzer" onclick="showPage('analyzer',this)">📊 Анализ</button>
     <button class="tab" id="tab-signal" onclick="showPage('signal',this)">🎯 Сигнал</button>
+<button class="tab" id="tab-journal" onclick="showPage('journal',this)">📒 Журнал</button>
     <button class="tab" id="tab-history" onclick="showPage('history',this)">📋 История</button>
     <button class="tab" id="tab-settings" onclick="showPage('settings',this)">⚙️ Настройки</button>
   </div>
@@ -201,7 +202,7 @@ tr:hover td{background:rgba(0,180,255,.04)}
   </div>
 </div>
 
-<!-- SIGNAL -->
+
 <div class="page" id="page-signal">
   <div id="signalArea">
     <div class="empty"><div class="empty-icon">🎯</div><div>Сигнал появится после анализа</div></div>
@@ -247,17 +248,7 @@ tr:hover td{background:rgba(0,180,255,.04)}
   </div>
 </div>
 
-<!-- NEWS -->
-<div id="newsSection">
-  <div class="news-header">
-    <div class="news-title">📡 КРИПТО НОВОСТИ</div>
-    <div class="news-sub">Последние события криптовалютного рынка</div>
-  </div>
-  <div class="news-ticker"><div class="news-ticker-inner" id="tickerText">⚡ Загружаем новости...</div></div>
-  <div class="news-grid" id="newsGrid">
-    <div style="grid-column:1/-1;text-align:center;color:var(--muted);padding:20px">⏳ Загружаем новости...</div>
-  </div>
-</div>
+
 <!-- FOOTER -->
 <div style="text-align:center;padding:40px 20px 50px;position:relative;z-index:1">
   <div style="font-size:11px;color:rgba(123,167,212,.4);letter-spacing:3px;text-transform:uppercase;margin-bottom:24px">Создано при участии</div>
@@ -421,11 +412,13 @@ const CHECK_INTERVAL=30*60*1000, MAX_SIGNAL_AGE=7*24*60*60*1000;
 setInterval(checkPendingSignals,CHECK_INTERVAL);
 setTimeout(checkPendingSignals,5000);
 
-function showPage(p,el){
-  document.querySelectorAll('.page').forEach(x=>x.classList.remove('active'));
-  document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
-  document.getElementById('page-'+p).classList.add('active');
-  (el||document.getElementById('tab-'+p)).classList.add('active');
+function showPage(p, el) {
+  document.querySelectorAll('.page').forEach(x => x.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+  const page = document.getElementById('page-' + p);
+  if (page) page.classList.add('active');
+  if (el) el.classList.add('active');
+  else { const tab = document.getElementById('tab-' + p); if (tab) tab.classList.add('active'); }
 }
 function saveSettings(){
   tgToken=document.getElementById('tgToken').value.trim();
@@ -901,7 +894,196 @@ function renderNews(items, source){
 setTimeout(loadNews, 3000);
 setInterval(loadNews, 5*60*1000);
 
-// ── TELEGRAM ──────────────────────────────────────────────────────────────────
+// ── AI TRADER ─────────────────────────────────────────────────────────────────
+const AI_WATCHLIST = ['BTCUSDT','ETHUSDT','SOLUSDT','BNBUSDT','XRPUSDT','AVAXUSDT'];
+
+async function runAITrader() {
+  const btn = document.getElementById('aiTraderBtn');
+  const result = document.getElementById('aiTraderResult');
+  btn.disabled = true; btn.textContent = '⏳ Ищем лучший сигнал...';
+
+  result.innerHTML = `<div class="card"><div class="loading">
+    <div class="spinner"></div>
+    <div class="loading-text" id="aiLoadMsg">Сканируем рынок...</div>
+    <div class="loading-step" id="aiLoadStep">Проверяем ${AI_WATCHLIST.length} монет</div>
+  </div></div>`;
+
+  const candidates = [];
+
+  for (const sym of AI_WATCHLIST) {
+    try {
+      document.getElementById('aiLoadMsg').textContent = `Анализируем ${sym}...`;
+      const [k15,k60,k240,kD] = await Promise.all([
+        getKlines(sym,'15'), getKlines(sym,'60'),
+        getKlines(sym,'240'), getKlines(sym,'D')
+      ]);
+      const ticker = await getTicker(sym);
+      const price = parseFloat(ticker.lastPrice);
+      const results = [calcTF(k15,'15м'),calcTF(k60,'1ч'),calcTF(k240,'4ч'),calcTF(kD,'1д')];
+
+      // Считаем согласованность сигналов
+      const longs  = results.filter(r=>r.dir==='LONG').length;
+      const shorts = results.filter(r=>r.dir==='SHORT').length;
+      const consensus = Math.max(longs, shorts);
+      const direction = longs > shorts ? 'LONG' : shorts > longs ? 'SHORT' : null;
+
+      if (!direction || consensus < 3) continue; // нужно минимум 3 из 4
+
+      const signal = generateSignal(sym, price, results);
+      if (!signal) continue;
+
+      // Проверяем R:R — для безопасной стратегии нужно минимум 1:2
+      const rr = Math.abs(signal.target - signal.entry) / Math.abs(signal.stopLoss - signal.entry);
+      if (rr < 1.8) continue;
+
+      // Считаем "безопасность" — чем выше тем лучше
+      const safetyScore = consensus * 2 + rr + (signal.confidence || 5);
+
+      candidates.push({ sym, price, signal, results, consensus, rr, safetyScore, ticker });
+    } catch(_) { continue; }
+  }
+
+  btn.disabled = false; btn.textContent = '⚡ Найти сигнал';
+
+  if (!candidates.length) {
+    result.innerHTML = `<div class="card" style="text-align:center;padding:30px">
+      <div style="font-size:40px;margin-bottom:12px">😴</div>
+      <div style="font-size:18px;font-weight:700;color:var(--text);margin-bottom:8px">Хороших сигналов нет</div>
+      <div style="font-size:14px;color:var(--muted);line-height:1.7">Сейчас рынок нестабилен или монеты двигаются в разных направлениях.<br>
+      <strong style="color:var(--yellow)">Рекомендация: подождать.</strong> Лучше пропустить сделку, чем потерять деньги.</div>
+    </div>`;
+    return;
+  }
+
+  // Выбираем самый безопасный сигнал
+  const best = candidates.sort((a,b) => b.safetyScore - a.safetyScore)[0];
+  renderAITraderSignal(best);
+}
+
+function renderAITraderSignal({sym, price, signal, results, consensus, rr, ticker}) {
+  const isL = signal.direction === 'LONG';
+  const dirColor = isL ? 'var(--green)' : 'var(--red)';
+  const pct = parseFloat(ticker.price24hPcnt || 0) * 100;
+
+  // Простое объяснение без терминов
+  const action = isL ? 'КУПИТЬ (Long)' : 'ПРОДАТЬ (Short)';
+  const actionDesc = isL
+    ? 'Монета скорее всего будет расти — покупаем сейчас, продаём когда цена вырастет до цели'
+    : 'Монета скорее всего будет падать — открываем позицию на продажу, закрываем когда цена упадёт до цели';
+
+  const riskAmt = Math.abs(signal.entry - signal.stopLoss);
+  const profitAmt = Math.abs(signal.target - signal.entry);
+  const riskPct = (riskAmt / signal.entry * 100).toFixed(2);
+  const profitPct = (profitAmt / signal.entry * 100).toFixed(2);
+
+  const conf = Math.min(10, Math.max(0, parseInt(signal.confidence) || 5));
+  const dots = Array.from({length:10},(_,i) =>
+    `<div class="conf-dot" style="background:${i<conf?(isL?'var(--green)':'var(--red)'):'rgba(255,255,255,.1)'};${i<conf?`box-shadow:0 0 6px ${dirColor}`:''}"></div>`
+  ).join('');
+
+  const safetyLevel = conf >= 8 ? {text:'Высокая', color:'var(--green)', icon:'🛡️'}
+    : conf >= 6 ? {text:'Средняя', color:'var(--yellow)', icon:'⚠️'}
+    : {text:'Умеренная', color:'var(--orange)', icon:'🔶'};
+
+  document.getElementById('aiTraderResult').innerHTML = `
+    <div class="signal-wrap ${isL?'long':'short'}" style="margin-bottom:14px">
+      <div style="font-size:13px;color:var(--muted);margin-bottom:8px;letter-spacing:1px">🤖 AI TRADER РЕКОМЕНДУЕТ</div>
+      <div style="font-size:32px;font-weight:900;color:${dirColor};text-shadow:0 0 20px ${dirColor};margin-bottom:4px">${action}</div>
+      <div style="font-size:24px;font-weight:800;margin-bottom:4px">${sym}</div>
+      <div style="font-size:14px;color:var(--muted);max-width:460px;margin:0 auto 16px;line-height:1.6">${actionDesc}</div>
+
+      <div class="sig-meta" style="margin-bottom:16px">
+        <div class="sig-meta-item">
+          <div class="sig-meta-label">Цена сейчас</div>
+          <div class="sig-meta-value">${fmt(price)}</div>
+        </div>
+        <div class="sig-meta-item">
+          <div class="sig-meta-label">Цель (выход)</div>
+          <div class="sig-meta-value" style="color:var(--yellow)">${fmt(signal.target)}</div>
+        </div>
+        <div class="sig-meta-item">
+          <div class="sig-meta-label">Стоп (выход)</div>
+          <div class="sig-meta-value" style="color:var(--red)">${fmt(signal.stopLoss)}</div>
+        </div>
+      </div>
+
+      <!-- Простое объяснение риска -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;max-width:400px;margin:0 auto 20px">
+        <div style="background:rgba(255,61,107,.1);border:1px solid rgba(255,61,107,.3);border-radius:10px;padding:14px;text-align:center">
+          <div style="font-size:11px;color:var(--muted);margin-bottom:4px">📉 МАКСИМАЛЬНЫЕ ПОТЕРИ</div>
+          <div style="font-size:20px;font-weight:800;color:var(--red)">-${riskPct}%</div>
+          <div style="font-size:11px;color:var(--muted);margin-top:4px">если цена пойдёт против нас</div>
+        </div>
+        <div style="background:rgba(0,255,157,.1);border:1px solid rgba(0,255,157,.3);border-radius:10px;padding:14px;text-align:center">
+          <div style="font-size:11px;color:var(--muted);margin-bottom:4px">📈 ВОЗМОЖНЫЙ ДОХОД</div>
+          <div style="font-size:20px;font-weight:800;color:var(--green)">+${profitPct}%</div>
+          <div style="font-size:11px;color:var(--muted);margin-top:4px">если цена достигнет цели</div>
+        </div>
+      </div>
+
+      <div style="font-size:13px;color:var(--muted);margin-bottom:6px">Уверенность AI: ${conf}/10</div>
+      <div class="conf-bar" style="margin-bottom:16px">${dots}</div>
+
+      <div style="background:rgba(0,0,0,.3);border-radius:10px;padding:16px;max-width:500px;margin:0 auto 20px;text-align:left">
+        <div style="font-size:12px;color:var(--blue);font-weight:700;margin-bottom:8px;letter-spacing:1px">📋 ЧТО ДЕЛАТЬ ПОШАГОВО:</div>
+        <div style="font-size:13px;color:var(--muted);line-height:2">
+          1️⃣ Открой Bybit → раздел <strong style="color:var(--text)">Деривативы</strong><br>
+          2️⃣ Найди монету <strong style="color:var(--text)">${sym}</strong><br>
+          3️⃣ Нажми <strong style="color:${dirColor}">${isL?'Buy/Long':'Sell/Short'}</strong><br>
+          4️⃣ Установи стоп-лосс на <strong style="color:var(--red)">${fmt(signal.stopLoss)}</strong><br>
+          5️⃣ Установи тейк-профит на <strong style="color:var(--yellow)">${fmt(signal.target)}</strong><br>
+          6️⃣ Используй не более <strong style="color:var(--text)">5-10% от депозита</strong> на эту сделку
+        </div>
+      </div>
+
+      <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap">
+        <button class="btn btn-green" onclick="sendAISignalToTelegram()">📨 Отправить в Telegram</button>
+        <button class="btn btn-outline" onclick="runAITrader()">🔄 Найти другой сигнал</button>
+      </div>
+    </div>
+
+    <!-- Почему именно эта монета -->
+    <div class="card">
+      <div class="card-title">Почему именно ${sym}?</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px">
+        <div class="extra-card">
+          <div class="extra-label">Согласованность</div>
+          <div class="extra-value" style="color:var(--green)">${consensus}/4 таймфрейма</div>
+          <div class="extra-sub">Больше согласия = надёжнее сигнал</div>
+        </div>
+        <div class="extra-card">
+          <div class="extra-label">Соотношение риск/доход</div>
+          <div class="extra-value" style="color:var(--yellow)">1:${rr.toFixed(1)}</div>
+          <div class="extra-sub">За каждый $1 риска — ${rr.toFixed(1)} потенциального дохода</div>
+        </div>
+        <div class="extra-card">
+          <div class="extra-label">Безопасность сделки</div>
+          <div class="extra-value" style="color:${safetyLevel.color}">${safetyLevel.icon} ${safetyLevel.text}</div>
+          <div class="extra-sub">Оценка по всем индикаторам</div>
+        </div>
+        <div class="extra-card">
+          <div class="extra-label">Изменение за 24ч</div>
+          <div class="extra-value" style="color:${pct>=0?'var(--green)':'var(--red)'}">${pct>=0?'+':''}${pct.toFixed(2)}%</div>
+          <div class="extra-sub">Текущий импульс рынка</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="border-color:rgba(255,215,0,.2)">
+      <div style="font-size:13px;color:var(--muted);line-height:1.8">
+        ⚠️ <strong style="color:var(--yellow)">Важно помнить:</strong> Никакой алгоритм не гарантирует прибыль на 100%.
+        Всегда используй стоп-лосс и не вкладывай деньги которые не можешь позволить себе потерять.
+        Начинай с маленьких сумм пока не привыкнешь.
+      </div>
+    </div>`;
+
+  // Сохраняем для отправки в Telegram
+  currentSignal = { ...signal, symbol: sym };
+}
+
+function sendAISignalToTelegram() {
+  if (currentSignal) sendToTelegram();
+}
 async function sendToTelegram(){
   const tok=tgToken||document.getElementById('tgToken').value.trim();
   const cid=tgChatId||document.getElementById('tgChatId').value.trim();
