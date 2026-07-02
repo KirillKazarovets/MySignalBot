@@ -588,6 +588,9 @@ async function startAnalysis(){
   if(!sym)return;
   const btn=document.getElementById('analyzeBtn');
   btn.disabled=true;btn.textContent='⏳ Загрузка...';
+  const vol24 = parseFloat(ticker.turnover24h || 0);
+  const volStr = vol24>=1e9 ? `${(vol24/1e9).toFixed(1)}B` : vol24>=1e6 ? `${(vol24/1e6).toFixed(0)}M` : '—';
+
   document.getElementById('analysisArea').innerHTML=`<div class="card"><div class="loading"><div class="spinner"></div><div class="loading-text" id="loadMsg">Подключаемся к Bybit...</div><div class="loading-step" id="loadStep"></div></div></div>`;
   try{
     setLoad('Загружаем свечи...','15м · 1ч · 4ч · 1д');
