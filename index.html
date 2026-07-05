@@ -284,13 +284,40 @@ window.addEventListener('load',()=>{
   },2600);
 });
 
-// ── ХРАНИЛИЩЕ (облако + локальное) ────────────────────────────────────────────
+// ── ХРАНИЛИЩЕ (JSONBin облако) ────────────────────────────────────────────────
+const JBIN_ID  = '6a4a7a21da38895dfe3138da';
+const JBIN_KEY = '$2a$10$6H8MpS5h.gMqmVCRhI7zxOwl6UScbISYWTs324fD2S7Vp4ta.2pa.';
+const JBIN_URL = `https://api.jsonbin.io/v3/b/${JBIN_ID}`;
+
 async function cloudSave(key, data) {
-  try { await window.storage.set(key, JSON.stringify(data)); } catch(_) {}
+  // Сохраняем локально сразу
   try { localStorage.setItem(key, JSON.stringify(data)); } catch(_) {}
+  // Читаем текущее облако, обновляем нужный ключ
+  try {
+    const cur = await cloudLoadAll();
+    cur[key] = data;
+    await fetch(JBIN_URL, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'X-Master-Key': JBIN_KEY, 'X-Bin-Versioning': 'false' },
+      body: JSON.stringify(cur)
+    });
+  } catch(_) {}
 }
+
+async function cloudLoadAll() {
+  try {
+    const r = await fetch(JBIN_URL + '/latest', { headers: { 'X-Master-Key': JBIN_KEY } });
+    const d = await r.json();
+    return d.record || {};
+  } catch(_) { return {}; }
+}
+
 async function cloudLoad(key) {
-  try { const r = await window.storage.get(key); if (r?.value) return JSON.parse(r.value); } catch(_) {}
+  try {
+    const all = await cloudLoadAll();
+    if (all[key]) return all[key];
+  } catch(_) {}
+  // Fallback на localStorage
   try { const v = localStorage.getItem(key); if (v) return JSON.parse(v); } catch(_) {}
   return null;
 }
