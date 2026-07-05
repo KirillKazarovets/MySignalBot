@@ -323,9 +323,41 @@ async function cloudLoad(key) {
 }
 
 async function initData() {
-  signalHistory = (await cloudLoad('sh')) || [];
-  journal       = (await cloudLoad('jn')) || [];
-  try { const w = await cloudLoad('wt'); if (w) weights = {...weights, ...w}; } catch(_) {}
+  // Сначала читаем локальные данные
+  let localSH = null, localJN = null;
+  try { const v = localStorage.getItem('sh'); if (v) localSH = JSON.parse(v); } catch(_) {}
+  try { const v = localStorage.getItem('jn'); if (v) localJN = JSON.parse(v); } catch(_) {}
+
+  // Читаем облако
+  const cloud = await cloudLoadAll();
+
+  // Если в облаке пусто но локально есть — заливаем локальное в облако
+  const cloudSH = cloud['sh'] || [];
+  const cloudJN = cloud['jn'] || [];
+
+  if (localSH && localSH.length > 0 && cloudSH.length === 0) {
+    // Локальных больше — заливаем в облако
+    signalHistory = localSH;
+    journal = localJN || [];
+    await fetch(JBIN_URL, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'X-Master-Key': JBIN_KEY, 'X-Bin-Versioning': 'false' },
+      body: JSON.stringify({ sh: signalHistory, jn: journal })
+    });
+  } else if (cloudSH.length > 0 && (!localSH || cloudSH.length >= localSH.length)) {
+    // В облаке больше или столько же — берём облако
+    signalHistory = cloudSH;
+    journal = cloudJN;
+    // Обновляем локальное
+    try { localStorage.setItem('sh', JSON.stringify(signalHistory)); } catch(_) {}
+    try { localStorage.setItem('jn', JSON.stringify(journal)); } catch(_) {}
+  } else {
+    // Берём что есть
+    signalHistory = localSH || cloudSH || [];
+    journal = localJN || cloudJN || [];
+  }
+
+  try { const w = cloud['wt']; if (w) weights = {...weights, ...w}; } catch(_) {}
   renderHistory();
   renderJournal();
 }
